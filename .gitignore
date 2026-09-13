@@ -1,0 +1,8 @@
+videos/
+dataset/
+output/
+runs/
+__pycache__/
+*.pt
+*.hef
+models/rolls.onnx

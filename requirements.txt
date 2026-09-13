@@ -1,0 +1,6 @@
+# PC (labeling helpers, training, testing on videos)
+opencv-python
+numpy
+onnxruntime
+ultralytics
+# Raspberry Pi 5: sudo apt install hailo-all python3-opencv v4l-utils ; pip install onnxruntime

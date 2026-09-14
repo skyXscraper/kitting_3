@@ -74,3 +74,4 @@ Video files are resampled to 15 fps and played in real time.
   2. higher resolution or the camera closer to the roll
   3. fine-tuning the PP-OCR recognizer on crops from this site
 - A short dash that looks like a dot is corrected automatically: `31.3.34.1` becomes `31.3-34.1`.
+- **Inverted or sideways text:** the ply number is always written above the start-end, so the position of the ply box relative to the range box shows which way is up. Ply below range means the text is rotated 180°, and ply left or right of range means it is rotated 90°. Both crops are turned upright before OCR. Digits like 0, 1, 2, 5, 8 and 6↔9 look valid either way up, so OCR scores alone can't tell. If only one text line is visible, the OCR tries both orientations and keeps the better valid reading. Label inverted and standing rolls with the same classes; `train.py` uses up-down and left-right flips.

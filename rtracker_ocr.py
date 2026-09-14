@@ -15,9 +15,10 @@ from collections import Counter
 from datetime import datetime
 
 import cv2
+import numpy as np
 
-from detector import load_detector
-from ocr import TextReader, PLY_RE, RANGE_RE
+from detector import load_detector, rect_bounds, rect_points, PLY, RANGE, ROLL, TEXT
+from ocr import TextReader, PLY_RE, RANGE_RE, align_rect, crop_rect, text_rotation
 
 FPS = 15
 OCR_EVERY = 5      # frames between OCR attempts per text field of a roll
@@ -35,9 +36,9 @@ def iou(a, b):
 class Track:
     next_id = 1
 
-    def __init__(self, box):
+    def __init__(self, rect):
         self.id, Track.next_id = Track.next_id, Track.next_id + 1
-        self.box, self.missed, self.logged = box, 0, False
+        self.rect, self.missed, self.logged = rect, 0, False  # rotated rect (cx, cy, w, h, theta)
         self.votes = {"ply": Counter(), "range": Counter()}
         self.last_ocr = {"ply": -OCR_EVERY, "range": -OCR_EVERY, "auto": -OCR_EVERY}
 
@@ -117,10 +118,10 @@ def main():
 
     def ocr_worker():
         while True:
-            track, field, crop = jobs.get()
+            track, field, crop, rotation = jobs.get()
             # "auto" = unclassified text line (no-training mode): keep whichever format it matches
             for f in (["range", "ply"] if field == "auto" else [field]):
-                text, score = reader.read(crop, PLY_RE if f == "ply" else RANGE_RE)
+                text, score = reader.read(crop, PLY_RE if f == "ply" else RANGE_RE, rotation)
                 if text and score >= MIN_SCORE:
                     track.votes[f][text] += 1
                     break
@@ -132,41 +133,48 @@ def main():
         frame_no += 1
         fh, fw = frame.shape[:2]
         dets = detector.detect(frame)
-        rolls = [d[2:] for d in dets if d[0] == 0]
-        texts = [d for d in dets if d[0] in (1, 2, 3)]
+        rolls = [d[2] for d in dets if d[0] == ROLL]
+        texts = [d for d in dets if d[0] in (PLY, RANGE, TEXT)]
 
-        # --- track rolls (greedy IoU matching) ---
+        # --- track rolls (greedy IoU matching on the rotated boxes' outer bounds) ---
         unmatched = list(range(len(rolls)))
         for t in tracks:
-            best = max(unmatched, key=lambda j: iou(t.box, rolls[j]), default=None)
-            if best is not None and iou(t.box, rolls[best]) > 0.3:
-                t.box, t.missed = rolls[best], 0
+            best = max(unmatched, key=lambda j: iou(rect_bounds(t.rect), rect_bounds(rolls[j])), default=None)
+            if best is not None and iou(rect_bounds(t.rect), rect_bounds(rolls[best])) > 0.3:
+                t.rect, t.missed = rolls[best], 0
                 unmatched.remove(best)
             else:
                 t.missed += 1
         tracks = [t for t in tracks if t.missed <= MAX_MISSED] + [Track(rolls[j]) for j in unmatched]
 
-        # --- send text crops of each roll to OCR ---
-        for cls, _, x1, y1, x2, y2 in texts:
-            field = {1: "ply", 2: "range", 3: "auto"}[cls]
-            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        # --- assign text boxes to the roll whose rotated box contains their centre ---
+        roll_texts = {}
+        for d in texts:
             for t in tracks:
-                if t.missed == 0 and t.box[0] <= cx <= t.box[2] and t.box[1] <= cy <= t.box[3]:
-                    confirmed = t.value("ply", args.votes)[1] and t.value("range", args.votes)[1] \
-                        if field == "auto" else t.value(field, args.votes)[1]
-                    due = frame_no - t.last_ocr[field] >= OCR_EVERY or t.last_ocr[field] == frame_no
-                    if not confirmed and due:
-                        pad = 4
-                        crop = frame[max(0, int(y1) - pad):min(fh, int(y2) + pad),
-                                     max(0, int(x1) - pad):min(fw, int(x2) + pad)].copy()
-                        try:
-                            jobs.put_nowait((t, field, crop))
-                            t.last_ocr[field] = frame_no
-                        except queue.Full:
-                            pass
-                    if not text_only:
-                        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (255, 200, 0), 1)
+                if t.missed == 0 and cv2.pointPolygonTest(rect_points(t.rect), d[2][:2], False) >= 0:
+                    roll_texts.setdefault(t, []).append(d)
                     break
+
+        # --- text orientation from layout (ply above start-end), then send straightened crops to OCR ---
+        for t, ds in roll_texts.items():
+            rng = [d[2] for d in ds if d[0] == RANGE]
+            if rng:  # point every text box of this roll the same way as the range box
+                ds = [(c, s, align_rect(r, rng[0][4])) for c, s, r in ds]
+            ply = [d[2] for d in ds if d[0] == PLY]
+            rotation = text_rotation(ply[0], rng[0]) if ply and rng else None  # None: OCR tries both ways
+            for cls, _, rect in ds:
+                field = {PLY: "ply", RANGE: "range", TEXT: "auto"}[cls]
+                confirmed = t.value("ply", args.votes)[1] and t.value("range", args.votes)[1] \
+                    if field == "auto" else t.value(field, args.votes)[1]
+                due = frame_no - t.last_ocr[field] >= OCR_EVERY or t.last_ocr[field] == frame_no
+                if not confirmed and due:
+                    try:
+                        jobs.put_nowait((t, field, crop_rect(frame, rect), rotation))
+                        t.last_ocr[field] = frame_no
+                    except queue.Full:
+                        pass
+                if not text_only:
+                    cv2.polylines(frame, [np.int32(rect_points(rect))], True, (255, 200, 0), 1)
 
         # --- draw results, log confirmed readings ---
         for t in tracks:
@@ -176,9 +184,9 @@ def main():
             rng, rng_ok = t.value("range", args.votes)
             done = ply_ok and rng_ok
             color = (0, 200, 0) if done else (0, 165, 255)
-            x1, y1, x2, y2 = map(int, t.box)
+            x1, y1 = map(int, rect_bounds(t.rect)[:2])
             label = f"#{t.id} Ply {ply or '?'} | {rng or '?'}"
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.polylines(frame, [np.int32(rect_points(t.rect))], True, color, 2)
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
             ty = max(th + 8, y1)
             cv2.rectangle(frame, (x1, ty - th - 8), (x1 + tw + 6, ty), color, -1)

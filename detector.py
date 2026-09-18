@@ -61,6 +61,7 @@ class HailoDetector:
         for out in self.model.outputs:
             out.set_format_type(FormatType.FLOAT32)  # dequantized outputs
         self.configured = self.model.configure()
+        self.configured.activate()
         self.bindings = self.configured.create_bindings()
         self.h, self.w = self.model.input().shape[:2]
         self.outputs = {o.name: o.shape for o in self.model.outputs}  # (H, W, C)

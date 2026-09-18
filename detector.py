@@ -78,6 +78,9 @@ class HailoDetector:
             grids.setdefault(shape[0], {})[kind] = self.bindings.output(name).get_buffer()
         dets = decode_obb(grids, self.h, self.conf)
         return [(c, sc, ((r[0] - px) / s, (r[1] - py) / s, r[2] / s, r[3] / s, r[4])) for c, sc, r in dets]
+    def close(self):
+        self.configured.deactivate()
+        self.configured.shutdown()
 
 
 def decode_obb(grids, input_size, conf):

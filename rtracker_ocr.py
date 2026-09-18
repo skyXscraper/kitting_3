@@ -93,11 +93,13 @@ def main():
     ap.add_argument("--height", type=int, default=720)
     ap.add_argument("--exposure", type=int, default=None, help="manual exposure (100 us units), omit for auto")
     ap.add_argument("--conf", type=float, default=0.4)
+    ap.add_argument("--roi", default=None, help="static ROI 'x,y,w,h' in source pixels; only this region is detected")
     ap.add_argument("--votes", type=int, default=3, help="matching OCR reads needed to confirm a value")
     ap.add_argument("--out", default="output/annotated.mp4")
     ap.add_argument("--csv", default="output/readings.csv")
     ap.add_argument("--no-show", action="store_true")
     args = ap.parse_args()
+    roi = tuple(int(v) for v in args.roi.split(",")) if args.roi else None
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     detector = load_detector(args.model, args.conf)
@@ -132,7 +134,14 @@ def main():
     for frame in frames_15fps(cap, is_file):
         frame_no += 1
         fh, fw = frame.shape[:2]
-        dets = detector.detect(frame)
+        if roi:  # detect inside the ROI only (more pixels on the text), then shift back to frame coords
+            rx, ry = max(0, roi[0]), max(0, roi[1])
+            rw, rh = min(roi[2], fw - rx), min(roi[3], fh - ry)
+            dets = [(c, s, (r[0] + rx, r[1] + ry, r[2], r[3], r[4]))
+                    for c, s, r in detector.detect(frame[ry:ry + rh, rx:rx + rw])]
+            cv2.rectangle(frame, (rx, ry), (rx + rw, ry + rh), (255, 0, 255), 1)
+        else:
+            dets = detector.detect(frame)
         rolls = [d[2] for d in dets if d[0] == ROLL]
         texts = [d for d in dets if d[0] in (PLY, RANGE, TEXT)]
 
